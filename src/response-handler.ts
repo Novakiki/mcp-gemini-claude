@@ -1,4 +1,5 @@
 import { NetworkError } from './errors.js';
+import { Logger, OutputFormat } from './types.js';
 
 /**
  * Types for Gemini API responses
@@ -32,12 +33,7 @@ export interface GeminiResponse {
 /**
  * Response format options
  */
-export enum ResponseFormat {
-  TEXT = 'text',
-  MARKDOWN = 'markdown',
-  CODE = 'code',
-  JSON = 'json'
-}
+export type ResponseFormat = 'text' | 'markdown' | 'code' | 'json';
 
 /**
  * Options for parsing responses
@@ -46,7 +42,7 @@ export interface ResponseParsingOptions {
   format?: ResponseFormat;
   includeSafetyInfo?: boolean;
   includeUsageInfo?: boolean;
-  logger?: any;
+  logger?: Logger;
 }
 
 /**
@@ -71,7 +67,7 @@ export function parseGeminiResponse(
   rawResponse: any, 
   options: ResponseParsingOptions = {}
 ): ParsedGeminiResponse {
-  const logger = options.logger || { debug: () => {}, info: () => {}, error: () => {} };
+  const logger: Logger = options.logger || { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
   
   logger.debug("Parsing Gemini response", {
     responseType: typeof rawResponse,
@@ -147,11 +143,12 @@ export function parseGeminiResponse(
  * Attempt to detect the format of the response
  */
 function detectResponseFormat(text: string): ResponseFormat {
+
   // Check if it's mostly JSON
   if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
     try {
       JSON.parse(text);
-      return ResponseFormat.JSON;
+      return 'json';
     } catch (e) {
       // Not valid JSON
     }
@@ -162,7 +159,7 @@ function detectResponseFormat(text: string): ResponseFormat {
   const codeBlocks = text.match(codeBlockRegex);
   
   if (codeBlocks && codeBlocks.join('').length > text.length * 0.5) {
-    return ResponseFormat.CODE;
+    return 'code';
   }
   
   // Check for markdown features
@@ -182,11 +179,11 @@ function detectResponseFormat(text: string): ResponseFormat {
   );
   
   if (markdownScore >= 2) {
-    return ResponseFormat.MARKDOWN;
+    return 'markdown';
   }
   
   // Default to plain text
-  return ResponseFormat.TEXT;
+  return 'text';
 }
 
 /**
@@ -196,10 +193,10 @@ export function formatResponseForMCP(
   parsedResponse: ParsedGeminiResponse,
   options: {
     includeMetadata?: boolean;
-    logger?: any;
+    logger?: Logger;
   } = {}
 ): { content: Array<{ type: string; text: string }> } {
-  const logger = options.logger || { debug: () => {}, info: () => {}, error: () => {} };
+  const logger: Logger = options.logger || { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
   
   let responseText = parsedResponse.text;
   
@@ -239,11 +236,11 @@ export function createStructuredOutput(
   options: {
     includePrompt?: boolean;
     includeMetadata?: boolean;
-    outputFormat?: 'text' | 'json';
-    logger?: any;
+    outputFormat?: OutputFormat;
+    logger?: Logger;
   } = {}
 ): { content: Array<{ type: string; text: string }> } {
-  const logger = options.logger || { debug: () => {}, info: () => {}, error: () => {} };
+  const logger: Logger = options.logger || { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
   
   if (options.outputFormat === 'json') {
     const output: any = {
@@ -295,6 +292,96 @@ export function createStructuredOutput(
   }
   
   logger.debug("Created text structured output");
+  
+  return {
+    content: [{ type: "text", text: output }]
+  };
+}
+
+/**
+ * Build a response that includes both AI text and analysis results
+ */
+export function buildResponseFromAnalysis(
+  parsedResponse: ParsedGeminiResponse,
+  analysisResult: any,
+  options: {
+    outputFormat?: OutputFormat;
+    includeMetadata?: boolean;
+    includeAnalysisDetails?: boolean;
+    logger?: Logger;
+  } = {}
+): { content: Array<{ type: string; text: string }> } {
+  const logger: Logger = options.logger || { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
+  
+  // For JSON output, return a combined structure
+  if (options.outputFormat === 'json') {
+    const output: any = {
+      response: parsedResponse.text,
+      format: parsedResponse.format
+    };
+    
+    // Add analysis data
+    if (options.includeAnalysisDetails !== false) {
+      output.analysis = {
+        components: analysisResult.components.length,
+        architecture: analysisResult.architecture.type,
+        patterns: analysisResult.patterns.map((p: any) => p.name)
+      };
+    }
+    
+    // Add metadata if requested
+    if (options.includeMetadata) {
+      if (parsedResponse.finishReason) {
+        output.finishReason = parsedResponse.finishReason;
+      }
+      
+      if (parsedResponse.usage) {
+        output.usage = parsedResponse.usage;
+      }
+    }
+    
+    logger.debug("Created JSON response with analysis data");
+    
+    return {
+      content: [{ type: "text", text: JSON.stringify(output, null, 2) }]
+    };
+  }
+  
+  // For text/markdown output, use the parsed response with additional sections
+  let output = parsedResponse.text;
+  
+  // Add analysis summary if requested
+  if (options.includeAnalysisDetails !== false) {
+    output += '\n\n## Analysis Summary\n';
+    output += `\n- Identified **${analysisResult.components.length}** components`;
+    output += `\n- Architecture: **${analysisResult.architecture.type}**`;
+    output += `\n- Detected design patterns: ${analysisResult.patterns.map((p: any) => p.name).join(', ')}`;
+    
+    if (analysisResult.metrics) {
+      output += `\n- Code metrics: ${analysisResult.metrics.totalFiles} files`;
+      if (analysisResult.metrics.cyclomaticComplexity) {
+        output += `, avg. complexity: ${analysisResult.metrics.cyclomaticComplexity}`;
+      }
+    }
+  }
+  
+  // Add metadata if requested
+  if (options.includeMetadata) {
+    let metadata = '\n\n---\n';
+    
+    if (parsedResponse.finishReason) {
+      metadata += `\nFinish reason: ${parsedResponse.finishReason}`;
+    }
+    
+    if (parsedResponse.usage) {
+      metadata += `\nToken usage: ${parsedResponse.usage.totalTokens} tokens`;
+      metadata += ` (${parsedResponse.usage.promptTokens} prompt, ${parsedResponse.usage.completionTokens} completion)`;
+    }
+    
+    output += metadata;
+  }
+  
+  logger.debug("Created text response with analysis data");
   
   return {
     content: [{ type: "text", text: output }]

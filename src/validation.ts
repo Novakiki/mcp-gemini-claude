@@ -8,16 +8,16 @@ import { statSync, lstatSync, existsSync } from 'fs';
  */
 export const SIZE_LIMITS = {
   // Maximum repository size in bytes
-  MAX_REPO_SIZE_BYTES: 100 * 1024 * 1024, // 100 MB
+  MAX_REPO_SIZE_BYTES: 150 * 1024 * 1024, // 150 MB
   
   // Maximum number of files in a repository
-  MAX_FILE_COUNT: 5000,
+  MAX_FILE_COUNT: 10000,
   
   // Maximum size of a single file to analyze
   MAX_FILE_SIZE_BYTES: 5 * 1024 * 1024, // 5 MB
   
   // Maximum token count for repository content
-  MAX_TOKEN_COUNT: 100000,
+  MAX_TOKEN_COUNT: 200000,
   
   // File patterns to always exclude (binary files, etc.)
   ALWAYS_EXCLUDE_PATTERNS: [

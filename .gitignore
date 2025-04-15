@@ -1,36 +1,141 @@
-# Dependencies
+# Node.js dependencies and build artifacts
 node_modules/
 npm-debug.log
 yarn-debug.log
 yarn-error.log
-
-# Build output
+.pnpm-debug.log
 dist/
 build/
 *.tsbuildinfo
 
-# Environment variables
+# Environment variables and secrets
 .env
 .env.local
-.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+credentials.json
+service-account.json
 
-# Temporary files
-.tmp/
-temp/
-tmp/
-*.tmp
-
-# Log files
+# Logs
 logs/
 *.log
 
-# Editor and OS files
-.DS_Store
+# IDE and editor files
 .idea/
 .vscode/
 *.swp
 *.swo
+.DS_Store
+Thumbs.db
 
-# Misc
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+
+# Testing
 coverage/
 .nyc_output/
+
+# Build tools
+.cache/
+.parcel-cache/
+
+# Temporary files
+tmp/
+temp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project-specific ignores
+# MCP Gemini-Claude specific files
+**/output/
+**/outputs/
+**/temp/
+**/tmp/
+**/cache/
+**/.cache/
+
+# API response caches
+*response_cache*
+*response-cache*
+*.cache.json
+
+# Generated files
+generated/
+*-generated.*
+*.generated.*
+
+# Repomix-specific files
+repomix-*.log
+repomix-*.json
+repomix-*.csv
+repomix-*.txt
+
+# Specific tool outputs
+*.pack
+*_packed.*
+*_summary.*
+*_report.*
+*_analysis.*
+
+# Config backups
+*.config.bak
+*config.backup
+*config.old
+
+# Large model files or embeddings
+*.bin
+*.pt
+*.gguf
+*.safetensors
+*embeddings/
+*vectors/
+
+# Temporary execution files
+*.tmp.js
+*.tmp.py
+*.tmp.ts
+
+# Repomix output files
+.repomix-output*.txt
+.repomixignore
+
+# Documentation files that may contain sensitive implementation details
+*-INSTRUCTIONS.md
+*-ARCHITECTURE.md
+README-DIAGNOSTIC.md
+ENHANCEMENTS.md
+FIXES.md
+IMPROVEMENTS.md
+
+# Scripts and utilities for local development
+*.sh
+make-executable.js
+*-test.js
+*test.js
+cursor-tools*.js
+cursor-tools*.json
+*-diagnostic.js
+
+# Test directories and results
+test-repomix/
+test-results/
+
+# Temporary readme files
+readme-test.md

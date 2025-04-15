@@ -1,4 +1,5 @@
 import { FileError, PathAccessError, ApiKeyMissingError, NetworkError } from './errors.js';
+import { Logger } from './types.js';
 import path from 'path';
 import fs from 'fs';
 import fsPromises from 'fs/promises';
@@ -65,7 +66,7 @@ export function createSecureTempDir(prefix: string = 'gemini-bridge-'): { tempDi
 /**
  * Safely clean up temporary files
  */
-export async function cleanupTempFiles(tempFile: string, tempDir: string, logger: any): Promise<void> {
+export async function cleanupTempFiles(tempFile: string, tempDir: string, logger: Logger): Promise<void> {
   try {
     if (fs.existsSync(tempFile)) {
       await fsPromises.unlink(tempFile);
@@ -82,16 +83,24 @@ export async function cleanupTempFiles(tempFile: string, tempDir: string, logger
 
 /**
  * Retry function with exponential backoff
+ * @template T The return type of the operation
+ * @param operation The async operation to retry
+ * @param maxRetries Maximum number of retry attempts
+ * @param initialDelay Initial delay in milliseconds before first retry
+ * @param shouldRetry Function that determines if a particular error should trigger a retry
+ * @param logger Optional logger for retry messages
+ * @returns Result of the operation if successful
+ * @throws The last error encountered if all retries fail
  */
 export async function retryWithBackoff<T>(
   operation: () => Promise<T>,
   maxRetries: number = 3,
   initialDelay: number = 1000,
-  shouldRetry: (error: any) => boolean = () => true,
-  logger?: any
+  shouldRetry: (error: unknown) => boolean = () => true,
+  logger?: Logger
 ): Promise<T> {
   let attempt = 1;
-  let lastError: any;
+  let lastError: unknown;
   
   while (attempt <= maxRetries) {
     try {
@@ -105,7 +114,8 @@ export async function retryWithBackoff<T>(
       
       const delay = initialDelay * Math.pow(2, attempt - 1);
       if (logger) {
-        logger.info(`Retry attempt ${attempt}/${maxRetries} after ${delay}ms...`);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.info(`Retry attempt ${attempt}/${maxRetries} after ${delay}ms due to: ${errorMessage}`);
       }
       
       await new Promise(resolve => setTimeout(resolve, delay));
@@ -113,13 +123,18 @@ export async function retryWithBackoff<T>(
     }
   }
   
-  throw lastError;
+  // At this point, all retries have failed
+  if (lastError instanceof Error) {
+    throw lastError;
+  } else {
+    throw new Error(`Operation failed after ${maxRetries} attempts: ${String(lastError)}`);
+  }
 }
 
 /**
  * Enhanced error logging with detailed information
  */
-export function logErrorDetails(error: any, logger: any): void {
+export function logErrorDetails(error: any, logger: Logger): void {
   if (error instanceof Error) {
     logger.error(`${error.name}: ${error.message}`);
     

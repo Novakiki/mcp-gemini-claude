@@ -1,23 +1,20 @@
 // Gemini configuration file with model specifications and parameters
-
-/**
- * Interface for Gemini model configuration
- */
-export interface GeminiModelConfig {
-  id: string;               // Model identifier for API calls
-  displayName: string;      // Human-readable name for logs and messages
-  maxInputTokens: number;   // Maximum tokens for input
-  maxOutputTokens: number;  // Maximum tokens for response generation
-  description: string;      // Brief description of the model's capabilities
-  contextWindow: number;    // Total context window size
-  defaultTemp: number;      // Default temperature value
-  isPreview?: boolean;      // Whether the model is in preview
-}
+import { GeminiModelConfig } from './types.js';
 
 /**
  * Available Gemini models
  */
 export const GEMINI_MODELS: Record<string, GeminiModelConfig> = {
+  "gemini-2.5-pro-exp-03-25": {
+    id: "gemini-2.5-pro-exp-03-25",
+    displayName: "Gemini 2.5 Pro Experimental",
+    maxInputTokens: 1000000,
+    maxOutputTokens: 8192,
+    description: "Experimental model with enhanced code analysis capabilities",
+    contextWindow: 1000000,
+    defaultTemp: 0.7,
+    isPreview: true
+  },
   "gemini-2.5-pro": {
     id: "gemini-2.5-pro",
     displayName: "Gemini 2.5 Pro",
@@ -87,7 +84,7 @@ export const GEMINI_MODELS: Record<string, GeminiModelConfig> = {
  * Default model to use if none specified
  * Uses environment variable GEMINI_DEFAULT_MODEL if set, otherwise defaults to gemini-2.5-pro
  */
-export const DEFAULT_MODEL = process.env.GEMINI_DEFAULT_MODEL || "gemini-2.5-pro";
+export const DEFAULT_MODEL = process.env.GEMINI_DEFAULT_MODEL || "gemini-2.5-pro-exp-03-25";
 
 /**
  * Get model configuration by ID

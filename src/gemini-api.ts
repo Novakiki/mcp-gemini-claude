@@ -4,6 +4,7 @@ import { execSync } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import { existsSync } from 'fs';
+import { Logger, GeminiOptions } from './types.js';
 
 // Import Gemini configuration
 import { DEFAULT_MODEL, getModelConfig, getModelApiUrl } from './gemini-config.js';
@@ -13,15 +14,7 @@ import { getConfigManager } from './config-manager.js';
 
 // API endpoints are now dynamic based on the model configuration
 
-/**
- * Options for calling the Gemini API
- */
-interface GeminiOptions {
-  maxTokens?: number;
-  temperature?: number;
-  model?: string;
-  logger?: any;
-}
+// GeminiOptions is now imported from types.js
 
 /**
  * Validate the Gemini API key format
@@ -52,7 +45,7 @@ async function callGeminiApi(
   apiKey: string, 
   options: GeminiOptions
 ): Promise<string> {
-  const logger = options.logger || { debug: () => {}, info: () => {}, error: () => {} };
+  const logger = options.logger || { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
   const configManager = getConfigManager(logger);
   
   // Get the model config
@@ -107,6 +100,7 @@ export async function callGemini(
   const logger = options.logger || {
     debug: () => {},
     info: () => {},
+    warn: () => {},
     error: () => {}
   };
   

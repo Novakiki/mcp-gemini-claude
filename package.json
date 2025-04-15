@@ -18,7 +18,8 @@
     "claude",
     "gemini",
     "model-context-protocol",
-    "repomix"
+    "repomix",
+    "code-analysis"
   ],
   "author": "",
   "license": "MIT",
