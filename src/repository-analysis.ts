@@ -3,7 +3,7 @@
  * 
  * This module is responsible for analyzing a repository after it has been packaged.
  * It provides deep analysis capabilities to extract architecture, components, patterns,
- * and other useful information from the code.
+ * and other useful information from the code using AST-based analysis.
  */
 
 import * as fs from 'fs/promises';
@@ -11,6 +11,17 @@ import * as path from 'path';
 import { scanRepository } from './repomix-utils.js';
 import { Logger } from './types.js';
 import { TOKEN_LIMITS } from './token-management.js';
+import { 
+  analyzeRepository as astAnalyzeRepository,
+  analyzeFile,
+  analyzeFiles,
+  AstAnalysisResult,
+  Component as AstComponent,
+  ProgrammingLanguage,
+  CodeLocation,
+  detectComponentDependencies,
+  detectDesignPatterns as astDetectDesignPatterns
+} from './ast-analyzer.js';
 
 /**
  * Result of the repository analysis
@@ -105,7 +116,56 @@ interface PerformanceIssue {
 }
 
 /**
- * Perform custom analysis on a repository
+ * Extract files from packaged code
+ * This is required to enable analyzing the code with AST
+ * @param packagedCodePath Path to the packaged code file
+ * @param outputDir Directory to extract files to
+ * @returns Map of original file paths to extracted file paths
+ */
+async function extractFilesFromPackagedCode(
+  packagedCodePath: string,
+  outputDir: string,
+  logger: Logger
+): Promise<Map<string, string>> {
+  logger.info('Extracting files from packaged code');
+  
+  // Create output directory if it doesn't exist
+  await fs.mkdir(outputDir, { recursive: true });
+  
+  // Read the packaged code file
+  const packagedCode = await fs.readFile(packagedCodePath, 'utf-8');
+  
+  // Extract files using regex
+  const fileRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g;
+  let match;
+  const fileMap = new Map<string, string>();
+  
+  while ((match = fileRegex.exec(packagedCode)) !== null) {
+    const [, filePath, fileContent] = match;
+    
+    // Skip files with non-analyzable extensions
+    const ext = path.extname(filePath).toLowerCase();
+    if (!['.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.cs', '.go', '.rb', '.php'].includes(ext)) {
+      continue;
+    }
+    
+    // Create subdirectories as needed
+    const outputFilePath = path.join(outputDir, filePath);
+    await fs.mkdir(path.dirname(outputFilePath), { recursive: true });
+    
+    // Write file
+    await fs.writeFile(outputFilePath, fileContent);
+    
+    // Add to map
+    fileMap.set(filePath, outputFilePath);
+  }
+  
+  logger.info(`Extracted ${fileMap.size} files for AST analysis`);
+  return fileMap;
+}
+
+/**
+ * Perform custom analysis on a repository using AST-based analysis
  * @param repoDir Original repository directory
  * @param packagedCodePath Path to the packaged code file
  * @param options Analysis options
@@ -131,77 +191,142 @@ export async function analyzeRepository(
   // Scan the repository for file information
   const scanResult = await scanRepository(repoDir, { logger });
   
-  // Read the packaged code file
-  const packagedCode = await fs.readFile(packagedCodePath, 'utf-8');
+  // Create a temporary directory for extracted files
+  const tempDir = path.join(path.dirname(packagedCodePath), 'extracted-files-' + Date.now());
   
-  // Extract core architecture
-  const architecture = await detectArchitecture(packagedCode, scanResult, {
-    analysisType,
-    analysisDepth,
-    logger
-  });
-  
-  // Identify components
-  const components = await identifyComponents(packagedCode, scanResult, {
-    analysisType,
-    analysisDepth,
-    logger
-  });
-  
-  // Analyze dependencies
-  const dependencies = await analyzeDependencies(packagedCode, scanResult, {
-    analysisType,
-    analysisDepth,
-    extractImports: options.extractImports !== false,
-    logger
-  });
-  
-  // Detect design patterns
-  const patterns = await detectDesignPatterns(packagedCode, scanResult, {
-    analysisType,
-    analysisDepth,
-    logger
-  });
-  
-  // Calculate code metrics
-  const metrics = calculateCodeMetrics(packagedCode, scanResult, components, dependencies);
-  
-  // Add specialized analysis based on analysis type
-  let securityIssues, performanceIssues;
-  
-  if (analysisType === 'security' || analysisType === 'comprehensive') {
-    securityIssues = await analyzeSecurityIssues(packagedCode, scanResult, {
+  try {
+    // Extract files from packaged code for AST analysis
+    const fileMap = await extractFilesFromPackagedCode(packagedCodePath, tempDir, logger);
+    
+    // Get list of extracted file paths for AST analysis
+    const extractedFilePaths = Array.from(fileMap.values());
+    
+    // Perform AST analysis on extracted files
+    logger.info('Performing AST analysis on extracted files');
+    const astResults = await analyzeFiles(extractedFilePaths, { logger });
+    
+    // Extract core architecture based on AST results and file structure
+    const architecture = await detectArchitecture(scanResult, astResults, {
+      analysisType,
       analysisDepth,
       logger
     });
-  }
-  
-  if (analysisType === 'performance' || analysisType === 'comprehensive') {
-    performanceIssues = await analyzePerformanceIssues(packagedCode, scanResult, {
+    
+    // Convert AST components to our component format
+    const components = convertAstComponents(astResults);
+    
+    // Detect dependencies between components using AST
+    const dependencies = await analyzeDependencies(astResults, {
+      analysisType,
+      analysisDepth,
+      extractImports: options.extractImports !== false,
+      logger
+    });
+    
+    // Detect design patterns using AST
+    const patterns = await detectDesignPatterns(astResults, {
+      analysisType,
       analysisDepth,
       logger
     });
+    
+    // Calculate code metrics
+    const metrics = calculateCodeMetrics(astResults, scanResult, components, dependencies);
+    
+    // Add specialized analysis based on analysis type
+    let securityIssues, performanceIssues;
+    
+    if (analysisType === 'security' || analysisType === 'comprehensive') {
+      securityIssues = await analyzeSecurityIssues(astResults, {
+        analysisDepth,
+        logger
+      });
+    }
+    
+    if (analysisType === 'performance' || analysisType === 'comprehensive') {
+      performanceIssues = await analyzePerformanceIssues(astResults, {
+        analysisDepth,
+        logger
+      });
+    }
+    
+    logger.info(`Repository analysis completed with ${components.length} components identified`);
+    
+    return {
+      architecture,
+      components,
+      dependencies,
+      patterns,
+      metrics,
+      ...(securityIssues && { securityIssues }),
+      ...(performanceIssues && { performanceIssues })
+    };
+  } finally {
+    // Clean up temporary files
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    } catch (error) {
+      logger.warn(`Failed to clean up temporary directory: ${tempDir}`, error);
+    }
   }
-  
-  logger.info(`Repository analysis completed with ${components.length} components identified`);
-  
-  return {
-    architecture,
-    components,
-    dependencies,
-    patterns,
-    metrics,
-    ...(securityIssues && { securityIssues }),
-    ...(performanceIssues && { performanceIssues })
-  };
 }
 
 /**
- * Detect the overall architecture of the codebase
+ * Convert AST components to our component format
+ */
+function convertAstComponents(astResults: AstAnalysisResult[]): Component[] {
+  const components: Component[] = [];
+  
+  // Collect all components from AST results
+  for (const result of astResults) {
+    for (const astComponent of result.components) {
+      // Create component object
+      const component: Component = {
+        name: astComponent.name,
+        path: path.dirname(astComponent.filePath),
+        description: `${astComponent.type} component ${astComponent.framework ? `using ${astComponent.framework}` : ''}`,
+        files: [astComponent.filePath],
+        responsibilities: []
+      };
+      
+      // Determine responsibilities based on component type and framework
+      if (astComponent.type === 'class' || astComponent.type === 'function') {
+        if (astComponent.framework === 'React') {
+          component.responsibilities = ['ui', 'component'];
+        } else if (astComponent.framework === 'Angular') {
+          component.responsibilities = ['ui', 'component'];
+        } else if (astComponent.framework === 'Vue') {
+          component.responsibilities = ['ui', 'component'];
+        } else if (astComponent.framework === 'Flask' || astComponent.framework === 'Express') {
+          component.responsibilities = ['controller', 'route'];
+        } else if (astComponent.framework === 'Django' || astComponent.framework === 'Sequelize') {
+          component.responsibilities = ['model', 'data'];
+        } else {
+          component.responsibilities = [astComponent.type];
+        }
+      }
+      
+      // Add component if not already exists
+      const existingComponent = components.find(c => c.name === component.name);
+      if (existingComponent) {
+        // Merge files and responsibilities
+        existingComponent.files = [...new Set([...(existingComponent.files || []), ...(component.files || [])])];
+        existingComponent.responsibilities = [...new Set([...(existingComponent.responsibilities || []), ...(component.responsibilities || [])])];
+      } else {
+        components.push(component);
+      }
+    }
+  }
+  
+  return components;
+}
+
+/**
+ * Detect the overall architecture of the codebase using AST analysis and directory structure
  */
 async function detectArchitecture(
-  packagedCode: string, 
   scanResult: any,
+  astResults: AstAnalysisResult[],
   options: {
     analysisType: string;
     analysisDepth: string;
@@ -209,7 +334,7 @@ async function detectArchitecture(
   }
 ): Promise<Architecture> {
   const { logger } = options;
-  logger.debug('Detecting architecture');
+  logger.debug('Detecting architecture using AST analysis');
   
   // Analyze the file structure to infer architecture pattern
   const architecture: Architecture = {
@@ -219,48 +344,83 @@ async function detectArchitecture(
     entryPoints: []
   };
   
-  // Check for common architecture patterns based on directory structure and key files
+  // Find entry points from AST analysis
+  const entryPoints = astResults
+    .filter(result => result.entryPoint)
+    .map(result => result.filePath);
+  
+  architecture.entryPoints = entryPoints;
+  
+  // Check for common architecture patterns based on directory structure
+  const directories = scanResult.directories || [];
   
   // Check for MVC pattern
   if (
-    packagedCode.includes('/models/') && 
-    packagedCode.includes('/views/') && 
-    packagedCode.includes('/controllers/')
+    directories.some((dir: string) => dir.includes('/models/')) && 
+    directories.some((dir: string) => dir.includes('/views/')) && 
+    directories.some((dir: string) => dir.includes('/controllers/'))
   ) {
     architecture.type = 'MVC';
     architecture.layers = ['Model', 'View', 'Controller'];
   }
   // Check for MVVM pattern
   else if (
-    packagedCode.includes('/models/') && 
-    packagedCode.includes('/views/') && 
-    packagedCode.includes('/viewmodels/')
+    directories.some((dir: string) => dir.includes('/models/')) && 
+    directories.some((dir: string) => dir.includes('/views/')) && 
+    directories.some((dir: string) => dir.includes('/viewmodels/'))
   ) {
     architecture.type = 'MVVM';
     architecture.layers = ['Model', 'View', 'ViewModel'];
   }
   // Check for Clean Architecture
   else if (
-    packagedCode.includes('/entities/') && 
-    packagedCode.includes('/usecases/') && 
-    (packagedCode.includes('/adapters/') || packagedCode.includes('/interfaces/'))
+    directories.some((dir: string) => dir.includes('/entities/')) && 
+    directories.some((dir: string) => dir.includes('/usecases/')) && 
+    (directories.some((dir: string) => dir.includes('/adapters/')) || 
+     directories.some((dir: string) => dir.includes('/interfaces/')))
   ) {
     architecture.type = 'Clean Architecture';
     architecture.layers = ['Entities', 'Use Cases', 'Interface Adapters', 'Frameworks'];
   }
   // Check for Microservices architecture
   else if (
-    packagedCode.includes('/services/') && 
-    packagedCode.includes('/api/') && 
-    packagedCode.match(/docker-compose\.ya?ml/)
+    directories.some((dir: string) => dir.includes('/services/')) && 
+    directories.some((dir: string) => dir.includes('/api/')) && 
+    scanResult.files.some((file: { path: string }) => file.path.match(/docker-compose\.ya?ml/))
   ) {
     architecture.type = 'Microservices';
     architecture.layers = ['API Gateway', 'Service Layer', 'Data Layer'];
   }
-  // Check for Monolithic architecture
-  else if (scanResult.directories.some((dir: string) => dir.includes('config'))) {
-    architecture.type = 'Monolithic';
-    architecture.layers = ['Presentation', 'Business Logic', 'Data Access'];
+  // Check for React application architecture
+  else if (
+    directories.some((dir: string) => dir.includes('/components/')) && 
+    astResults.some(result => 
+      result.imports.some(imp => imp.source === 'react' || imp.source === 'react-dom')
+    )
+  ) {
+    architecture.type = 'React Application';
+    architecture.layers = ['Components', 'Hooks', 'Services', 'API'];
+  }
+  // Check for Angular application architecture
+  else if (
+    directories.some((dir: string) => dir.includes('/components/')) && 
+    directories.some((dir: string) => dir.includes('/services/')) && 
+    astResults.some(result => 
+      result.imports.some(imp => imp.source.includes('@angular/'))
+    )
+  ) {
+    architecture.type = 'Angular Application';
+    architecture.layers = ['Components', 'Services', 'Modules'];
+  }
+  // Check for Express/Node.js application
+  else if (
+    directories.some((dir: string) => dir.includes('/routes/')) && 
+    astResults.some(result => 
+      result.imports.some(imp => imp.source === 'express')
+    )
+  ) {
+    architecture.type = 'Express Application';
+    architecture.layers = ['Routes', 'Controllers', 'Models', 'Middleware'];
   }
   // Default to n-tier architecture
   else {
@@ -273,246 +433,16 @@ async function detectArchitecture(
     .filter((dir: string) => !dir.includes('/') && dir !== 'node_modules' && dir !== 'dist' && dir !== '.git')
     .map((dir: string) => dir);
   
-  // Find entry points by looking for index files, main files, or app files
-  const entryPointPatterns = [
-    /index\.(?:js|ts|jsx|tsx|py|java|rb)$/,
-    /main\.(?:js|ts|jsx|tsx|py|java|rb)$/,
-    /app\.(?:js|ts|jsx|tsx|py|java|rb)$/,
-    /server\.(?:js|ts|jsx|tsx|py|java|rb)$/,
-  ];
-  
-  const entryPoints = scanResult.files
-    .filter((file: { path: string }) => 
-      entryPointPatterns.some(pattern => pattern.test(file.path))
-    )
-    .map((file: { path: string }) => file.path)
-    .slice(0, 5); // Limit to top 5 entry points
-  
   architecture.mainModules = mainModuleCandidates.slice(0, 10); // Limit to top 10 modules
-  architecture.entryPoints = entryPoints;
   
   return architecture;
 }
 
 /**
- * Identify components in the codebase
- */
-async function identifyComponents(
-  packagedCode: string, 
-  scanResult: any,
-  options: {
-    analysisType: string;
-    analysisDepth: string;
-    logger: Logger;
-  }
-): Promise<Component[]> {
-  const { logger } = options;
-  logger.debug('Identifying components');
-  
-  const components: Component[] = [];
-  
-  // Pattern to extract component-like structures from the code
-  const componentPatterns = [
-    // React/Vue component pattern
-    {
-      regex: /<file path="([^"]+)">\s*((?:import|require)[^\n]*\n)*\s*(?:export default |export |class |function )([A-Z][A-Za-z0-9_]*)(?:Component)?\s*(?:extends|implements|:|\(|\{)/g,
-      type: 'ui'
-    },
-    // Service pattern
-    {
-      regex: /<file path="([^"]+)">\s*((?:import|require)[^\n]*\n)*\s*(?:export default |export |class |function |const )([A-Za-z0-9_]*)(?:Service|Provider|Repository|Manager|Handler)\s*(?:extends|implements|:|\(|\{)/g,
-      type: 'service'
-    },
-    // Controller pattern
-    {
-      regex: /<file path="([^"]+)">\s*((?:import|require)[^\n]*\n)*\s*(?:export default |export |class |function )([A-Za-z0-9_]*)(?:Controller|Router|Route|Api)\s*(?:extends|implements|:|\(|\{)/g,
-      type: 'controller'
-    },
-    // Model pattern
-    {
-      regex: /<file path="([^"]+)">\s*((?:import|require)[^\n]*\n)*\s*(?:export default |export |class |interface |type )([A-Za-z0-9_]*)(?:Model|Entity|Schema|Type|Interface)\s*(?:extends|implements|:|\(|\{)/g,
-      type: 'model'
-    }
-  ];
-  
-  // Extract components from packagedCode using regex patterns
-  for (const pattern of componentPatterns) {
-    const regex = new RegExp(pattern.regex);
-    let match;
-    
-    while ((match = regex.exec(packagedCode)) !== null) {
-      const [, filePath, , componentName] = match;
-      
-      // Determine component path (directory)
-      const componentPath = path.dirname(filePath);
-      
-      // Check if component already exists with the same name
-      const existingComponent = components.find(c => c.name === componentName);
-      
-      if (existingComponent) {
-        // Add this file to existing component
-        if (existingComponent.files) {
-          existingComponent.files.push(filePath);
-        } else {
-          existingComponent.files = [filePath];
-        }
-      } else {
-        // Create new component
-        components.push({
-          name: componentName,
-          path: componentPath,
-          files: [filePath],
-          responsibilities: [pattern.type]
-        });
-      }
-    }
-  }
-  
-  // Also identify components based on directory structure
-  const componentDirPatterns = [
-    { pattern: /components\/([^\/]+)$/, type: 'ui' },
-    { pattern: /services\/([^\/]+)$/, type: 'service' },
-    { pattern: /controllers\/([^\/]+)$/, type: 'controller' },
-    { pattern: /models\/([^\/]+)$/, type: 'model' },
-    { pattern: /hooks\/([^\/]+)$/, type: 'hook' },
-    { pattern: /utils\/([^\/]+)$/, type: 'utility' },
-    { pattern: /middleware\/([^\/]+)$/, type: 'middleware' },
-  ];
-  
-  // Group files by directory as potential components
-  const dirToFiles: Record<string, string[]> = {};
-  
-  for (const file of scanResult.files) {
-    const dir = path.dirname(file.path);
-    if (!dirToFiles[dir]) {
-      dirToFiles[dir] = [];
-    }
-    dirToFiles[dir].push(file.path);
-  }
-  
-  // Analyze directories that look like components
-  for (const [dir, files] of Object.entries(dirToFiles)) {
-    // Skip directories with too many or too few files
-    if (files.length < 2 || files.length > 20) continue;
-    
-    // Check if directory matches component patterns
-    for (const { pattern, type } of componentDirPatterns) {
-      const match = dir.match(pattern);
-      if (match) {
-        const componentName = match[1];
-        // Ensure reasonable component name (no weird characters, reasonable length)
-        if (componentName && /^[A-Za-z0-9_-]+$/.test(componentName) && componentName.length < 30) {
-          // Convert to PascalCase if needed
-          const pascalName = componentName.charAt(0).toUpperCase() + componentName.slice(1);
-          
-          // Check if component already exists
-          const existingComponent = components.find(c => c.name === pascalName || c.path === dir);
-          
-          if (existingComponent) {
-            // Update existing component
-            existingComponent.files = Array.from(new Set([...(existingComponent.files || []), ...files]));
-            if (!existingComponent.responsibilities?.includes(type)) {
-              existingComponent.responsibilities = [...(existingComponent.responsibilities || []), type];
-            }
-          } else {
-            // Create new component
-            components.push({
-              name: pascalName,
-              path: dir,
-              files,
-              responsibilities: [type]
-            });
-          }
-          break;
-        }
-      }
-    }
-  }
-  
-  // For more comprehensive analysis, try to infer component purposes and descriptions
-  if (options.analysisDepth === 'comprehensive') {
-    for (const component of components) {
-      component.description = inferComponentDescription(component, packagedCode);
-      component.complexity = calculateComponentComplexity(component, packagedCode);
-    }
-  }
-  
-  return components;
-}
-
-/**
- * Infer a component's description from its code
- */
-function inferComponentDescription(component: Component, packagedCode: string): string {
-  // Try to extract comments that might describe the component
-  const fileSection = component.files && component.files[0] ? 
-    packagedCode.substring(
-      packagedCode.indexOf(`<file path="${component.files[0]}">`),
-      packagedCode.indexOf('</file>', packagedCode.indexOf(`<file path="${component.files[0]}">`)) + 7
-    ) : '';
-  
-  // Look for JSDoc or similar comment blocks
-  const commentBlockMatch = fileSection.match(/\/\*\*[\s\S]+?\*\/|\/\*[\s\S]+?\*\/|#\s*[^\n]+/);
-  if (commentBlockMatch) {
-    // Clean up the comment
-    return commentBlockMatch[0]
-      .replace(/\/\*\*|\*\/|\/\*|\*\/|\*\s*|\s*\*\s*|#\s*/g, '')
-      .trim()
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('@'))
-      .join(' ')
-      .substring(0, 200) + (commentBlockMatch[0].length > 200 ? '...' : '');
-  }
-  
-  // If no comment block, generate a description based on the component type and name
-  const type = component.responsibilities?.[0] || 'component';
-  const name = component.name;
-  
-  return `${name} ${type} located in ${component.path}`;
-}
-
-/**
- * Calculate component complexity based on code metrics
- */
-function calculateComponentComplexity(component: Component, packagedCode: string): number {
-  let complexity = 0;
-  
-  if (!component.files) return 1;
-  
-  // Base complexity on number of files
-  complexity += Math.min(5, component.files.length / 2);
-  
-  // Increase complexity based on file sizes
-  for (const file of component.files) {
-    const fileSection = packagedCode.substring(
-      packagedCode.indexOf(`<file path="${file}">`),
-      packagedCode.indexOf('</file>', packagedCode.indexOf(`<file path="${file}">`)) + 7
-    );
-    
-    // Count lines of code
-    const lines = fileSection.split('\n').length;
-    complexity += Math.min(3, lines / 100);
-    
-    // Count functions and classes as indicators of complexity
-    const functionMatches = fileSection.match(/function\s+\w+|const\s+\w+\s*=\s*\(|class\s+\w+/g);
-    complexity += functionMatches ? Math.min(4, functionMatches.length / 2) : 0;
-    
-    // Count conditionals as indicators of complexity
-    const conditionalMatches = fileSection.match(/if\s*\(|switch\s*\(|for\s*\(|while\s*\(|catch\s*\(/g);
-    complexity += conditionalMatches ? Math.min(3, conditionalMatches.length / 3) : 0;
-  }
-  
-  // Scale to a 1-10 range
-  return Math.min(10, Math.max(1, Math.round(complexity)));
-}
-
-/**
- * Analyze dependencies between components
+ * Analyze dependencies between components using AST
  */
 async function analyzeDependencies(
-  packagedCode: string, 
-  scanResult: any,
+  astResults: AstAnalysisResult[],
   options: {
     analysisType: string;
     analysisDepth: string;
@@ -521,75 +451,33 @@ async function analyzeDependencies(
   }
 ): Promise<Dependencies> {
   const { logger } = options;
-  logger.debug('Analyzing dependencies');
+  logger.debug('Analyzing dependencies using AST');
   
   // Initialize dependency structures
   const internal: Record<string, string[]> = {};
   const external: Record<string, string[]> = {};
   
-  // Extract imports from each file
-  const importRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g;
-  let match;
-  
-  while ((match = importRegex.exec(packagedCode)) !== null) {
-    const [, filePath, fileContent] = match;
+  // Collect imports from AST results
+  for (const result of astResults) {
+    internal[result.filePath] = [];
     
-    internal[filePath] = [];
-    
-    // Find all import statements
-    const importStatements = fileContent.match(/import\s+.*?from\s+['"](.+?)['"]/g) || [];
-    const requireStatements = fileContent.match(/require\s*\(\s*['"](.+?)['"]\s*\)/g) || [];
-    
-    // Process import statements
-    for (const importStmt of importStatements) {
-      const importMatch = importStmt.match(/from\s+['"](.+?)['"]/);
-      if (importMatch && importMatch[1]) {
-        const importPath = importMatch[1].trim();
-        
-        // Determine if it's an internal or external import
-        if (
-          importPath.startsWith('./') || 
-          importPath.startsWith('../') || 
-          (importPath.startsWith('/') && !importPath.startsWith('/node_modules/'))
-        ) {
-          // Internal dependency
-          internal[filePath].push(importPath);
-        } else {
-          // External dependency
-          const packageName = importPath.split('/')[0];
-          if (!external[packageName]) {
-            external[packageName] = [];
-          }
-          if (!external[packageName].includes(filePath)) {
-            external[packageName].push(filePath);
-          }
+    // Add internal dependencies
+    for (const dependency of result.dependencies) {
+      // Check if it's an internal dependency
+      if (
+        dependency.startsWith('./') || 
+        dependency.startsWith('../') || 
+        (dependency.startsWith('/') && !dependency.startsWith('/node_modules/'))
+      ) {
+        internal[result.filePath].push(dependency);
+      } else {
+        // External dependency
+        const packageName = dependency.split('/')[0];
+        if (!external[packageName]) {
+          external[packageName] = [];
         }
-      }
-    }
-    
-    // Process require statements
-    for (const requireStmt of requireStatements) {
-      const requireMatch = requireStmt.match(/require\s*\(\s*['"](.+?)['"]\s*\)/);
-      if (requireMatch && requireMatch[1]) {
-        const requirePath = requireMatch[1].trim();
-        
-        // Determine if it's an internal or external import
-        if (
-          requirePath.startsWith('./') || 
-          requirePath.startsWith('../') || 
-          (requirePath.startsWith('/') && !requirePath.startsWith('/node_modules/'))
-        ) {
-          // Internal dependency
-          internal[filePath].push(requirePath);
-        } else {
-          // External dependency
-          const packageName = requirePath.split('/')[0];
-          if (!external[packageName]) {
-            external[packageName] = [];
-          }
-          if (!external[packageName].includes(filePath)) {
-            external[packageName].push(filePath);
-          }
+        if (!external[packageName].includes(result.filePath)) {
+          external[packageName].push(result.filePath);
         }
       }
     }
@@ -599,49 +487,12 @@ async function analyzeDependencies(
   let graph: Record<string, string[]> | undefined;
   
   if (options.analysisDepth === 'comprehensive') {
-    graph = {};
+    // Use AST-based component dependency detection
+    const componentDependencies = detectComponentDependencies(astResults);
     
-    // Resolve relative paths to absolute paths
-    for (const [filePath, imports] of Object.entries(internal)) {
-      graph[filePath] = [];
-      
-      for (const importPath of imports) {
-        // Resolve relative path to actual file
-        let resolvedPath: string = '';
-        try {
-          resolvedPath = path.resolve(path.dirname(filePath), importPath);
-          
-          // Handle imports without extensions
-          if (!scanResult.files.some((file: { path: string }) => file.path === resolvedPath)) {
-            const extensions = ['.js', '.ts', '.jsx', '.tsx', '.json'];
-            for (const ext of extensions) {
-              const pathWithExt = resolvedPath + ext;
-              if (scanResult.files.some((file: { path: string }) => file.path === pathWithExt)) {
-                resolvedPath = pathWithExt;
-                break;
-              }
-            }
-          }
-          
-          // Also check for index files in directories
-          if (!scanResult.files.some((file: { path: string }) => file.path === resolvedPath)) {
-            const indexExtensions = ['/index.js', '/index.ts', '/index.jsx', '/index.tsx'];
-            for (const ext of indexExtensions) {
-              const indexPath = resolvedPath + ext;
-              if (scanResult.files.some((file: { path: string }) => file.path === indexPath)) {
-                resolvedPath = indexPath;
-                break;
-              }
-            }
-          }
-          
-          if (scanResult.files.some((file: { path: string }) => file.path === resolvedPath)) {
-            graph[filePath].push(resolvedPath);
-          }
-        } catch (error) {
-          logger.debug(`Error resolving import path: ${importPath} in ${filePath}`);
-        }
-      }
+    graph = {};
+    for (const [filePath, dependencies] of componentDependencies.entries()) {
+      graph[filePath] = dependencies;
     }
   }
   
@@ -653,11 +504,10 @@ async function analyzeDependencies(
 }
 
 /**
- * Detect design patterns in the code
+ * Detect design patterns in the code using AST
  */
 async function detectDesignPatterns(
-  packagedCode: string, 
-  scanResult: any,
+  astResults: AstAnalysisResult[],
   options: {
     analysisType: string;
     analysisDepth: string;
@@ -665,83 +515,21 @@ async function detectDesignPatterns(
   }
 ): Promise<Pattern[]> {
   const { logger } = options;
-  logger.debug('Detecting design patterns');
+  logger.debug('Detecting design patterns using AST');
   
+  // Use AST-based pattern detection
+  const astPatterns = astDetectDesignPatterns(astResults);
+  
+  // Convert to our pattern format
   const patterns: Pattern[] = [];
   
-  // Define patterns to look for
-  const patternDefinitions = [
-    {
-      name: 'Singleton',
-      regex: /(?:const|let|var)\s+\w+\s*=\s*(?:\(\s*function\s*\(\)\s*\{|function\s*\(\)\s*\{|\(\s*\)\s*(?:=>|=>\s*\{))[\s\S]*?(?:if\s*\(\s*(?:instance|this\.\w+|!(?:instance|\w+))\s*\)|return\s*(?:instance|\w+);)[\s\S]*?(?:instance|\w+)\s*=|\s*static\s+getInstance\s*\(/g,
-      description: 'Singleton pattern ensures a class has only one instance and provides a global point of access to it.'
-    },
-    {
-      name: 'Factory',
-      regex: /(?:class|function)\s+(\w+)Factory[\s\S]*?(?:create|make|build|getInstance|getHandler)[\s\S]*?return\s+(?:new\s+\w+|(\w+)\.getInstance\s*\(|(\w+)\.create)/g,
-      description: 'Factory pattern provides an interface for creating objects without specifying their concrete classes.'
-    },
-    {
-      name: 'Observer',
-      regex: /(?:subscribe|addEventListener|on(?!ce\s*\())[\s\S]*?(?:notify|emit|publish|dispatch|trigger|fire\s*\()/g,
-      description: 'Observer pattern defines a one-to-many dependency between objects where a state change in one object results in notification of all its dependents.'
-    },
-    {
-      name: 'Strategy',
-      regex: /(?:class|function)\s+(\w+)Strategy|(?:const|let|var)\s+strategies\s*=\s*(?:{|new Map\s*\()/g,
-      description: 'Strategy pattern defines a family of algorithms, encapsulates each one, and makes them interchangeable.'
-    },
-    {
-      name: 'Decorator',
-      regex: /(?:@\w+|function\s+\w+\s*\([^)]*?\)\s*{[\s\S]*?return\s+function\s*\([^)]*?\)\s*{)/g,
-      description: 'Decorator pattern attaches additional responsibilities to an object dynamically.'
-    },
-    {
-      name: 'MVC',
-      regex: /(?:class|function)\s+(?:\w+)Model[\s\S]*?(?:class|function)\s+(?:\w+)View[\s\S]*?(?:class|function)\s+(?:\w+)Controller/g,
-      description: 'Model-View-Controller pattern separates an application into three main components: model, view, and controller.'
-    },
-    {
-      name: 'Repository',
-      regex: /(?:class|function)\s+(\w+)Repository(?:\s+|{|extends|\()/g,
-      description: 'Repository pattern isolates the data layer from the rest of the app and provides an object-oriented view of the datasource.'
-    },
-    {
-      name: 'Provider',
-      regex: /(?:const|let|var|class)\s+(\w+Provider)[\s\S]*?(?:context|createContext|Provider)/g,
-      description: 'Provider pattern makes data available to multiple nested components without explicitly passing props.'
-    },
-  ];
-  
-  // Look for each pattern in the packaged code
-  for (const patternDef of patternDefinitions) {
-    const regex = new RegExp(patternDef.regex);
-    let match;
-    const instances: string[] = [];
-    
-    // Reset regex lastIndex
-    regex.lastIndex = 0;
-    
-    while ((match = regex.exec(packagedCode)) !== null) {
-      // Try to find which file this match belongs to
-      const fileStartPos = packagedCode.lastIndexOf('<file path="', match.index);
-      const fileEndPos = packagedCode.indexOf('</file>', match.index);
-      
-      if (fileStartPos >= 0 && fileEndPos > fileStartPos) {
-        const filePathMatch = packagedCode.substring(fileStartPos, packagedCode.indexOf('>', fileStartPos) + 1).match(/<file path="([^"]+)">/);
-        if (filePathMatch && filePathMatch[1]) {
-          const filePath = filePathMatch[1];
-          instances.push(filePath);
-        }
-      }
-    }
-    
-    // Only add pattern if instances were found
+  for (const [patternName, instances] of Object.entries(astPatterns)) {
     if (instances.length > 0) {
       patterns.push({
-        name: patternDef.name,
-        description: patternDef.description,
-        instances: Array.from(new Set(instances)) // Remove duplicates
+        name: patternName.charAt(0).toUpperCase() + patternName.slice(1),
+        description: getPatternDescription(patternName),
+        instances: instances.map(instance => instance.name),
+        locations: instances.map(instance => instance.filePath)
       });
     }
   }
@@ -750,10 +538,27 @@ async function detectDesignPatterns(
 }
 
 /**
- * Calculate various code metrics
+ * Get pattern description
+ */
+function getPatternDescription(patternName: string): string {
+  const descriptions: Record<string, string> = {
+    'singleton': 'Singleton pattern ensures a class has only one instance and provides a global point of access to it.',
+    'factory': 'Factory pattern provides an interface for creating objects without specifying their concrete classes.',
+    'observer': 'Observer pattern defines a one-to-many dependency between objects where a state change in one object results in notification of all its dependents.',
+    'strategy': 'Strategy pattern defines a family of algorithms, encapsulates each one, and makes them interchangeable.',
+    'adapter': 'Adapter pattern converts the interface of a class into another interface clients expect.',
+    'repository': 'Repository pattern isolates the data layer from the rest of the app and provides an object-oriented view of the datasource.',
+    'provider': 'Provider pattern makes data available to multiple nested components without explicitly passing props.'
+  };
+  
+  return descriptions[patternName] || `${patternName.charAt(0).toUpperCase() + patternName.slice(1)} pattern`;
+}
+
+/**
+ * Calculate various code metrics using AST results
  */
 function calculateCodeMetrics(
-  packagedCode: string,
+  astResults: AstAnalysisResult[],
   scanResult: any,
   components: Component[],
   dependencies: Dependencies
@@ -767,14 +572,41 @@ function calculateCodeMetrics(
     coupling: 0
   };
   
-  // Calculate average component complexity
-  if (components.length > 0) {
-    const totalComplexity = components.reduce((sum, component) => 
-      sum + (component.complexity || 1), 0);
-    metrics.avgComponentComplexity = Number((totalComplexity / components.length).toFixed(2));
+  // Calculate lines of code and complexity
+  let totalLines = 0;
+  let totalComplexity = 0;
+  
+  for (const result of astResults) {
+    totalComplexity += result.complexityScore || 0;
   }
   
-  // Calculate approximate coupling (based on dependencies)
+  // Calculate average complexity
+  metrics.cyclomaticComplexity = Math.round(totalComplexity / Math.max(1, astResults.length));
+  
+  // Calculate average component complexity
+  if (components.length > 0) {
+    let totalComponentComplexity = 0;
+    for (const component of components) {
+      // Set complexity based on AST results if available
+      if (!component.complexity) {
+        const componentFiles = component.files || [];
+        const componentAstResults = astResults.filter(result => componentFiles.includes(result.filePath));
+        
+        if (componentAstResults.length > 0) {
+          const avgComplexity = componentAstResults.reduce((sum, result) => sum + (result.complexityScore || 0), 0) / componentAstResults.length;
+          component.complexity = Math.min(10, Math.max(1, Math.round(avgComplexity)));
+        } else {
+          component.complexity = 1; // Default complexity
+        }
+      }
+      
+      totalComponentComplexity += component.complexity;
+    }
+    
+    metrics.avgComponentComplexity = Number((totalComponentComplexity / components.length).toFixed(2));
+  }
+  
+  // Calculate coupling (based on dependencies)
   const totalInternalDependencies = Object.values(dependencies.internal)
     .reduce((sum, deps) => sum + deps.length, 0);
   
@@ -784,7 +616,6 @@ function calculateCodeMetrics(
   }
   
   // Calculate approximate cohesion
-  // Cohesion is high when components are focused (high internal connectivity, low external connectivity)
   if (components.length > 0) {
     let totalCohesionScore = 0;
     
@@ -827,124 +658,116 @@ function calculateCodeMetrics(
     metrics.cohesion = Number((totalCohesionScore / components.length).toFixed(2));
   }
   
-  // Count lines of code (approximate)
-  const lineCount = packagedCode.split('\n').length;
-  metrics.linesOfCode = lineCount;
-  
-  // Calculate approximate cyclomatic complexity
-  const conditionalMatchesCount = (packagedCode.match(/if\s*\(|else\s*\{|for\s*\(|while\s*\(|catch\s*\(|case\s+|default\s*:|&&|\|\||\?/g) || []).length;
-  metrics.cyclomaticComplexity = Math.round(conditionalMatchesCount / Math.max(1, scanResult.fileCount));
-  
-  // Calculate comment ratio
-  const commentLines = (packagedCode.match(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|#[^\n]*/g) || []).length;
-  metrics.commentRatio = Number((commentLines / Math.max(1, lineCount)).toFixed(2));
-  
   return metrics;
 }
 
 /**
- * Analyze security issues in the code
+ * Analyze security issues in the code using AST
  */
 async function analyzeSecurityIssues(
-  packagedCode: string, 
-  scanResult: any,
+  astResults: AstAnalysisResult[],
   options: {
     analysisDepth: string;
     logger: Logger;
   }
 ): Promise<SecurityIssue[]> {
   const { logger } = options;
-  logger.debug('Analyzing security issues');
+  logger.debug('Analyzing security issues using AST');
   
   const securityIssues: SecurityIssue[] = [];
   
-  // Define security issue patterns to look for
-  const securityPatterns = [
-    {
-      name: 'Hardcoded Credentials',
-      regex: /(?:const|let|var|private|public)\s+(?:\w+(?:password|secret|key|token|auth))\s*=\s*['"`][^'"`]{4,}['"`]/gi,
-      severity: 'high',
-      description: 'Hardcoded credentials found in source code, which poses a significant security risk.'
-    },
-    {
-      name: 'SQL Injection',
-      regex: /(?:execute|query|db\.query|connection\.query|executeQuery)\s*\(\s*[\s\S]*?\+\s*(?:req\.(?:params|query|body)|request\.(?:params|query|body)|(?:params|query|body))/gi,
-      severity: 'critical',
-      description: 'Potential SQL injection vulnerability, where user input is directly concatenated into SQL queries.'
-    },
-    {
-      name: 'Cross-Site Scripting (XSS)',
-      regex: /(?:innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval|setTimeout|setInterval)\s*\(.*?(?:req\.(?:params|query|body)|request\.(?:params|query|body)|(?:params|query|body)|input|value)/gi,
-      severity: 'high',
-      description: 'Potential Cross-Site Scripting (XSS) vulnerability, where user input might be executed as code.'
-    },
-    {
-      name: 'Insecure Direct Object Reference',
-      regex: /(?:req|request)\.params\.(?:id|userId|fileId)|(?:params|query|body)\.(?:id|userId|fileId).*?(?:find|get|update|delete|remove)/gi,
-      severity: 'medium',
-      description: 'Possible Insecure Direct Object Reference (IDOR) where user input directly references objects without proper access control.'
-    },
-    {
-      name: 'No Input Validation',
-      regex: /app\.(?:get|post|put|delete|patch)\s*\(\s*(?:["'`][^"'`]+["'`]\s*,\s*)?function\s*\(\s*req\s*,/gi,
-      severity: 'medium',
-      description: 'Endpoint might lack input validation, making it vulnerable to various injection attacks.'
-    },
-    {
-      name: 'Weak Cryptography',
-      regex: /(?:createHash|createCipher)\s*\(\s*['"`](?:md5|sha1|des|rc4)['"`]/gi,
-      severity: 'high',
-      description: 'Usage of weak cryptographic algorithms that are considered insecure by modern standards.'
-    },
-    {
-      name: 'CORS Misconfiguration',
-      regex: /(?:Access-Control-Allow-Origin|res\.header\s*\(\s*['"`]Access-Control-Allow-Origin['"`])\s*(?:,\s*)?['"`]\*['"`]/gi,
-      severity: 'medium',
-      description: 'CORS is configured to allow all origins (*), which may lead to security vulnerabilities in certain contexts.'
-    },
-    {
-      name: 'Insecure Cookie Configuration',
-      regex: /(?:cookie|cookies|res\.cookie)\s*\(.*?(?:secure|httpOnly|sameSite)\s*:\s*false/gi,
-      severity: 'medium',
-      description: 'Cookies are configured without essential security attributes like Secure, HttpOnly, or SameSite.'
-    },
-    {
-      name: 'Path Traversal',
-      regex: /(?:(?:fs|require\(\s*['"`]fs['"`]\))\.(?:readFile|writeFile|appendFile|readFileSync|writeFileSync|appendFileSync)|path\.(?:resolve|join))\s*\(.*?(?:req\.(?:params|query|body)|request\.(?:params|query|body)|(?:params|query|body))/gi,
-      severity: 'high',
-      description: 'Potential path traversal vulnerability, where user input might be used in file operations.'
-    },
-    {
-      name: 'Missing Rate Limiting',
-      regex: /app\.(?:post|put)\s*\(\s*["'`]\/(?:login|signin|auth|authenticate|register|signup)["'`]/gi,
-      severity: 'low',
-      description: 'Authentication endpoints without obvious rate limiting, potentially allowing brute force attacks.'
-    }
-  ];
+  // Helper function to add security issue
+  function addSecurityIssue(
+    title: string,
+    severity: 'low' | 'medium' | 'high' | 'critical',
+    description: string,
+    filePath: string
+  ) {
+    securityIssues.push({
+      title,
+      severity,
+      description,
+      location: filePath,
+      recommendation: generateSecurityRecommendation(title)
+    });
+  }
   
-  // Look for each security issue pattern in the packaged code
-  for (const pattern of securityPatterns) {
-    const regex = new RegExp(pattern.regex);
-    let match;
+  // Analyze each file for security issues
+  for (const result of astResults) {
+    // Check for hardcoded credentials
+    for (const variable of result.variables) {
+      const name = variable.name.toLowerCase();
+      if (
+        (name.includes('password') || 
+         name.includes('secret') || 
+         name.includes('key') || 
+         name.includes('token') || 
+         name.includes('auth')) && 
+        variable.isConst && 
+        variable.initialValue === 'StringLiteral'
+      ) {
+        addSecurityIssue(
+          'Hardcoded Credentials',
+          'high',
+          `Hardcoded credentials found in variable "${variable.name}"`,
+          result.filePath
+        );
+      }
+    }
     
-    while ((match = regex.exec(packagedCode)) !== null) {
-      // Try to find which file this match belongs to
-      const fileStartPos = packagedCode.lastIndexOf('<file path="', match.index);
-      const fileEndPos = packagedCode.indexOf('</file>', match.index);
-      
-      if (fileStartPos >= 0 && fileEndPos > fileStartPos) {
-        const filePathMatch = packagedCode.substring(fileStartPos, packagedCode.indexOf('>', fileStartPos) + 1).match(/<file path="([^"]+)">/);
-        if (filePathMatch && filePathMatch[1]) {
-          const filePath = filePathMatch[1];
-          
-          // Add security issue
-          securityIssues.push({
-            title: pattern.name,
-            severity: pattern.severity as 'low' | 'medium' | 'high' | 'critical',
-            description: pattern.description,
-            location: filePath,
-            recommendation: generateSecurityRecommendation(pattern.name)
-          });
+    // Check for SQL Injection vulnerabilities in functions
+    for (const func of result.functions) {
+      // Look for functions that execute queries
+      if (
+        func.name.includes('query') || 
+        func.name.includes('execute') || 
+        func.name.includes('find') || 
+        func.name.includes('select')
+      ) {
+        // If function has parameters with names like 'id', 'query', 'input'
+        // and doesn't use parameterized queries
+        const riskyParams = func.params.filter(param => 
+          param.includes('id') || 
+          param.includes('query') || 
+          param.includes('input') || 
+          param.includes('param') || 
+          param.includes('request')
+        );
+        
+        if (riskyParams.length > 0) {
+          addSecurityIssue(
+            'SQL Injection',
+            'critical',
+            `Potential SQL injection vulnerability in function "${func.name}" using parameters: ${riskyParams.join(', ')}`,
+            result.filePath
+          );
+        }
+      }
+    }
+    
+    // Check for XSS vulnerabilities (DOM manipulation with user input)
+    // This would require more sophisticated analysis of variable usage
+    // Just checking if DOM manipulation functions are used with parameters
+    for (const func of result.functions) {
+      if (
+        func.name.includes('render') || 
+        func.name.includes('html') || 
+        func.name.includes('dom')
+      ) {
+        const riskyParams = func.params.filter(param => 
+          param.includes('content') || 
+          param.includes('html') || 
+          param.includes('text') || 
+          param.includes('input')
+        );
+        
+        if (riskyParams.length > 0) {
+          addSecurityIssue(
+            'Cross-Site Scripting (XSS)',
+            'high',
+            `Potential XSS vulnerability in function "${func.name}" using parameters: ${riskyParams.join(', ')}`,
+            result.filePath
+          );
         }
       }
     }
@@ -974,109 +797,70 @@ function generateSecurityRecommendation(issueType: string): string {
 }
 
 /**
- * Analyze performance issues in the code
+ * Analyze performance issues in the code using AST
  */
 async function analyzePerformanceIssues(
-  packagedCode: string, 
-  scanResult: any,
+  astResults: AstAnalysisResult[],
   options: {
     analysisDepth: string;
     logger: Logger;
   }
 ): Promise<PerformanceIssue[]> {
   const { logger } = options;
-  logger.debug('Analyzing performance issues');
+  logger.debug('Analyzing performance issues using AST');
   
   const performanceIssues: PerformanceIssue[] = [];
   
-  // Define performance issue patterns to look for
-  const performancePatterns = [
-    {
-      name: 'Inefficient Loops',
-      regex: /for\s*\([^)]*\)\s*[\s\S]*?for\s*\([^)]*\)[\s\S]*?(?:{[^{}]*}|[^{}]*for\s*\()/g,
-      impact: 'medium',
-      description: 'Nested loops that could potentially cause O(n²) or worse performance issues.'
-    },
-    {
-      name: 'Large Bundle Size',
-      regex: /import\s*{[^}]{100,}}\s*from/g,
-      impact: 'medium',
-      description: 'Large import statements that might increase bundle size unnecessarily.'
-    },
-    {
-      name: 'Memory Leak',
-      regex: /addEventListener[\s\S]*?(?!\s*removeEventListener)/g,
-      impact: 'high',
-      description: 'Event listeners added without corresponding removal, potentially causing memory leaks.'
-    },
-    {
-      name: 'Expensive DOM Operations',
-      regex: /(?:document\.getElementsBy|document\.querySelectorAll|\.innerHTML|\$\(['"]\w+['"])\)[\s\S]*?for\s*\(/g,
-      impact: 'medium',
-      description: 'DOM queries inside loops, which can be very inefficient.'
-    },
-    {
-      name: 'Inefficient State Updates',
-      regex: /(?:setState|useState)[\s\S]*?(?:setState|setX|setY|setCount|setData|setItems)/g,
-      impact: 'medium',
-      description: 'Multiple state updates that could potentially be batched.'
-    },
-    {
-      name: 'Unnecessary Renders',
-      regex: /(?:useEffect|componentDidUpdate)\s*\(\s*\(\s*\)\s*=>\s*{[\s\S]*?}\s*\)/g,
-      impact: 'low',
-      description: 'Effect hooks or lifecycle methods without dependency arrays, causing unnecessary renders.'
-    },
-    {
-      name: 'Large Component',
-      regex: /(?:function|class)\s+(\w+)[\s\S]{5000,}(?:return\s*\(|render\s*\(\s*\))/g,
-      impact: 'medium',
-      description: 'Unusually large component that could benefit from being split into smaller components.'
-    },
-    {
-      name: 'Synchronous Network Requests',
-      regex: /new\s+XMLHttpRequest\s*\(\s*\)[\s\S]*?\.open\s*\(\s*(?:'|")GET(?:'|")[^)]*false\s*\)/g,
-      impact: 'high',
-      description: 'Synchronous XMLHttpRequest, which blocks the main thread and causes poor performance.'
-    },
-    {
-      name: 'Missing Virtualization',
-      regex: /(?:map|forEach)\s*\(\s*\([^)]*\)\s*=>\s*[\s\S]*?(?:<(?:tr|li|div)[^>]*>)/g,
-      impact: 'medium',
-      description: 'Large lists rendered without virtualization, which can impact performance.'
-    },
-    {
-      name: 'Unoptimized Images',
-      regex: /<img\s+[^>]*src=(['"])[^'"]+\.(?:png|jpg|jpeg|gif)[^>]*>/g,
-      impact: 'low',
-      description: 'Image tags without width, height, or lazy loading attributes.'
-    }
-  ];
+  // Helper function to add performance issue
+  function addPerformanceIssue(
+    title: string,
+    impact: 'low' | 'medium' | 'high',
+    description: string,
+    filePath: string
+  ) {
+    performanceIssues.push({
+      title,
+      impact,
+      description,
+      location: filePath,
+      recommendation: generatePerformanceRecommendation(title)
+    });
+  }
   
-  // Look for each performance issue pattern in the packaged code
-  for (const pattern of performancePatterns) {
-    const regex = new RegExp(pattern.regex);
-    let match;
+  // Find files with high complexity scores
+  for (const result of astResults) {
+    if ((result.complexityScore || 0) > 15) {
+      addPerformanceIssue(
+        'High Cyclomatic Complexity',
+        'medium',
+        `File has high cyclomatic complexity score (${result.complexityScore})`,
+        result.filePath
+      );
+    }
     
-    while ((match = regex.exec(packagedCode)) !== null) {
-      // Try to find which file this match belongs to
-      const fileStartPos = packagedCode.lastIndexOf('<file path="', match.index);
-      const fileEndPos = packagedCode.indexOf('</file>', match.index);
-      
-      if (fileStartPos >= 0 && fileEndPos > fileStartPos) {
-        const filePathMatch = packagedCode.substring(fileStartPos, packagedCode.indexOf('>', fileStartPos) + 1).match(/<file path="([^"]+)">/);
-        if (filePathMatch && filePathMatch[1]) {
-          const filePath = filePathMatch[1];
-          
-          // Add performance issue
-          performanceIssues.push({
-            title: pattern.name,
-            impact: pattern.impact as 'low' | 'medium' | 'high',
-            description: pattern.description,
-            location: filePath,
-            recommendation: generatePerformanceRecommendation(pattern.name)
-          });
-        }
+    // Large component (many functions/methods)
+    if (result.functions.length + result.classes.length > 10) {
+      addPerformanceIssue(
+        'Large Component',
+        'medium',
+        `File contains many functions/classes (${result.functions.length + result.classes.length})`,
+        result.filePath
+      );
+    }
+    
+    // Check for imports with potential performance impact
+    const heavyImports = [
+      'lodash', 'moment', 'jquery', 'rxjs', 'aws-sdk', 'material-ui', '@mui/material'
+    ];
+    
+    for (const imp of result.imports) {
+      if (heavyImports.some(heavy => imp.source === heavy || imp.source.startsWith(`${heavy}/`))) {
+        addPerformanceIssue(
+          'Heavy Dependencies',
+          'low',
+          `File imports potentially heavy library: ${imp.source}`,
+          result.filePath
+        );
       }
     }
   }
@@ -1089,16 +873,15 @@ async function analyzePerformanceIssues(
  */
 function generatePerformanceRecommendation(issueType: string): string {
   const recommendations: Record<string, string> = {
+    'High Cyclomatic Complexity': 'Refactor complex functions into smaller, more focused functions.',
+    'Large Component': 'Split large components into smaller, more focused components for better maintainability and performance.',
+    'Heavy Dependencies': 'Consider importing only the specific functions needed from the library (tree-shaking) or using lighter alternatives.',
     'Inefficient Loops': 'Consider restructuring the algorithm to avoid nested loops, or use more efficient data structures.',
     'Large Bundle Size': 'Use named imports instead of importing everything, and consider code splitting.',
     'Memory Leak': 'Ensure all event listeners are properly removed when components unmount.',
     'Expensive DOM Operations': 'Move DOM queries outside of loops, and use document fragments for batch DOM operations.',
     'Inefficient State Updates': 'Batch multiple state updates together when possible.',
-    'Unnecessary Renders': 'Add proper dependency arrays to useEffect hooks to prevent unnecessary rerenders.',
-    'Large Component': 'Split large components into smaller, more focused components for better maintainability and performance.',
-    'Synchronous Network Requests': 'Use async/await or Promises for network requests instead of synchronous XMLHttpRequest.',
-    'Missing Virtualization': 'Use virtualization libraries (like react-window or react-virtualized) for rendering large lists.',
-    'Unoptimized Images': 'Add width, height, loading="lazy", and consider next-gen image formats.'
+    'Unnecessary Renders': 'Add proper dependency arrays to useEffect hooks to prevent unnecessary rerenders.'
   };
   
   return recommendations[issueType] || 'Optimize according to performance best practices.';

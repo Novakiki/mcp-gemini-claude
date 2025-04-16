@@ -14,8 +14,9 @@ import os from 'os';
 // Import Gemini configuration
 import { getAvailableModels, getModelConfig, DEFAULT_MODEL } from './gemini-config.js';
 
-// Import configuration manager
+// Import configuration and context managers
 import { getConfigManager } from './config-manager.js';
+import { getContextManager } from './context-manager.js';
 
 // Import our new enhanced modules
 import { 
@@ -23,6 +24,14 @@ import {
   releaseRateLimit, 
   SIZE_LIMITS 
 } from './validation.js';
+
+// Import bridge tools
+import {
+  chatWithClaudeTool,
+  evolveCodeTool,
+  manageContextTool,
+  configureClaudeTool
+} from './bridge-tools.js';
 import { 
   callGemini 
 } from './gemini-api.js';
@@ -118,7 +127,7 @@ const VERSION = "1.0.0";
 
 // Create the MCP server
 const server = new McpServer({
-  name: "gemini-bridge",
+  name: "claude-gemini-bridge",
   version: VERSION
 });
 
@@ -150,7 +159,13 @@ if (!GEMINI_API_KEY) {
   process.exit(1);
 }
 
-// Configuration resource to access model settings
+// Check for Claude API key (warning only - not all tools require it)
+const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+if (!CLAUDE_API_KEY) {
+  logger.warn("CLAUDE_API_KEY environment variable is not set. Claude-specific tools will not be functional.");
+}
+
+// Configuration resource to access Gemini model settings
 server.resource(
   "config",
   "config://gemini/models", 
@@ -186,6 +201,61 @@ server.resource(
   }
 );
 
+// Configuration resource to access Claude model settings
+server.resource(
+  "config",
+  "config://claude/models", 
+  async (uri) => {
+    try {
+      return {
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({
+            defaultModel: configManager.getClaudeModel(),
+            defaultTemperature: configManager.getClaudeTemperature(),
+            defaultMaxTokens: configManager.getClaudeMaxTokens(),
+            defaultSystemPrompt: configManager.getClaudeSystemPrompt(),
+            availableModels: [
+              {
+                id: "claude-3-opus-20240229",
+                displayName: "Claude 3 Opus",
+                description: "Most powerful model for complex tasks requiring careful reasoning"
+              },
+              {
+                id: "claude-3-sonnet-20240229",
+                displayName: "Claude 3 Sonnet",
+                description: "Balanced model with strong performance and faster response times"
+              },
+              {
+                id: "claude-3-haiku-20240307",
+                displayName: "Claude 3 Haiku",
+                description: "Fastest and most compact model for quick responses and high throughput"
+              }
+            ],
+            currentSettings: {
+              model: configManager.getClaudeModel(),
+              temperature: configManager.getClaudeTemperature(),
+              maxTokens: configManager.getClaudeMaxTokens(),
+              systemPrompt: configManager.getClaudeSystemPrompt()
+            },
+            apiKeySet: !!process.env.CLAUDE_API_KEY
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      logger.error("Error retrieving Claude configuration", error);
+      return {
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({
+            error: `Error retrieving Claude configuration: ${error instanceof Error ? error.message : String(error)}`
+          }, null, 2)
+        }]
+      };
+    }
+  }
+);
+
 // Configuration resource to access all settings
 server.resource(
   "config",
@@ -211,6 +281,71 @@ server.resource(
           uri: uri.href,
           text: JSON.stringify({
             error: `Error retrieving configuration: ${error instanceof Error ? error.message : String(error)}`
+          }, null, 2)
+        }]
+      };
+    }
+  }
+);
+
+// Context resource to access shared contexts
+server.resource(
+  "context",
+  new ResourceTemplate(
+    "context://{contextId}",
+    {
+      list: async () => {
+        try {
+          const contextManager = getContextManager(logger);
+          const contexts = await contextManager.listContexts();
+          
+          return {
+            resources: contexts.map(context => ({
+              uri: `context://${context.id}`,
+              text: `Context for ${context.repositoryPath}`,
+              name: context.id
+            }))
+          };
+        } catch (error) {
+          logger.error("Error listing contexts", error);
+          return { resources: [] };
+        }
+      }
+    }
+  ),
+  async (uri, { contextId }) => {
+    try {
+      const contextManager = getContextManager(logger);
+      
+      // Handle parameter being an array
+      const id = Array.isArray(contextId) ? contextId[0] : contextId as string;
+      
+      const context = await contextManager.getContext(id);
+      
+      if (!context) {
+        return {
+          contents: [{
+            uri: uri.href,
+            text: JSON.stringify({
+              error: `Context '${id}' not found`
+            }, null, 2)
+          }]
+        };
+      }
+      
+      return {
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify(context, null, 2)
+        }]
+      };
+    } catch (error) {
+      logger.error(`Error retrieving context`, error);
+      return {
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({
+            error: `Error retrieving context: ${error instanceof Error ? error.message : String(error)}`
           }, null, 2)
         }]
       };
@@ -588,6 +723,34 @@ server.tool(
         releaseRateLimit();
     }    
   }
+);
+
+// Chat with Claude directly
+server.tool(
+  chatWithClaudeTool.name,
+  chatWithClaudeTool.schema,
+  chatWithClaudeTool.handler
+);
+
+// Evolve code using Claude and Gemini
+server.tool(
+  evolveCodeTool.name,
+  evolveCodeTool.schema,
+  evolveCodeTool.handler
+);
+
+// Manage shared context between models
+server.tool(
+  manageContextTool.name,
+  manageContextTool.schema,
+  manageContextTool.handler
+);
+
+// Configure Claude settings
+server.tool(
+  configureClaudeTool.name,
+  configureClaudeTool.schema,
+  configureClaudeTool.handler
 );
 
 // Add health check method
@@ -1066,8 +1229,12 @@ const TOOL_DESCRIPTIONS = {
   analyzeGithubRepository: "Directly analyze GitHub repositories by URL or owner/repo format. Provides detailed code insights with support for branch selection and subdirectory focusing. Includes repository metadata and contextual analysis.",
   analyzeFiles: "Analyze specific files with enhanced context understanding. Perfect for examining code snippets, configuration files, or documentation with precise insights about implementation, patterns, and relationships between files.",
   chatWithGemini: "Send messages directly to Gemini models with control over response generation. Supports multiple models with customizable parameters for temperature and token length.",
+  chatWithClaude: "Send messages directly to Claude models with control over response generation. Supports system prompts and customizable parameters for temperature and token length.",
+  evolveCode: "Collaborative code evolution using both Claude and Gemini. Analyzes code structure with Gemini and generates evolution plans with Claude for refactoring, improvements, transformations, testing, and documentation.",
   configureGemini: "Set default parameters for all Gemini operations. Configure model selection, response creativity (temperature), and maximum response length to customize your experience across all tools.",
+  configureClaude: "Set default parameters for all Claude operations. Configure model selection, system prompts, temperature, and maximum token length to customize your experience.",
   manageConfiguration: "Comprehensive configuration management with reusable profiles. Create, update, switch between profiles, and manage GitHub integration settings for different use cases and environments.",
+  manageContext: "Manage shared context between Claude and Gemini models. Create, retrieve, update, and delete context objects that contain analysis results, reasoning, and evolution history.",
   healthCheck: "Verify that the Gemini Bridge service is operational. Checks API connectivity, configuration, and system resources to ensure proper functioning."
 };
 
@@ -1078,7 +1245,7 @@ server.resource("schema", "schema://metadata", async () => {
       {
         uri: "schema://metadata",
         text: JSON.stringify({
-          description: "Enhanced Gemini Bridge for repository analysis and direct chat",
+          description: "Enhanced Claude-Gemini Bridge for collaborative code analysis and evolution",
           version: VERSION,
           tools: [
             {
@@ -1132,13 +1299,74 @@ server.resource("schema", "schema://metadata", async () => {
               configResource: "config://gemini/models"
             },
             {
+              name: "chat-with-claude",
+              description: TOOL_DESCRIPTIONS.chatWithClaude,
+              models: [
+                {
+                  id: "claude-3-opus-20240229",
+                  name: "Claude 3 Opus",
+                  description: "Most powerful model for complex tasks requiring careful reasoning"
+                },
+                {
+                  id: "claude-3-sonnet-20240229",
+                  name: "Claude 3 Sonnet",
+                  description: "Balanced model with strong performance and faster response times"
+                },
+                {
+                  id: "claude-3-haiku-20240307",
+                  name: "Claude 3 Haiku",
+                  description: "Fastest and most compact model for quick responses and high throughput"
+                }
+              ],
+              configResource: "config://claude/models"
+            },
+            {
+              name: "evolve-code",
+              description: TOOL_DESCRIPTIONS.evolveCode,
+              evolutionTypes: [
+                {
+                  id: "refactor",
+                  name: "Refactor",
+                  description: "Restructure code without changing external behavior"
+                },
+                {
+                  id: "improve",
+                  name: "Improve",
+                  description: "Enhance performance, security, or other aspects"
+                },
+                {
+                  id: "transform",
+                  name: "Transform",
+                  description: "Convert to a different architecture or implementation"
+                },
+                {
+                  id: "test",
+                  name: "Test",
+                  description: "Generate comprehensive test suites"
+                },
+                {
+                  id: "document",
+                  name: "Document",
+                  description: "Create or improve documentation"
+                }
+              ]
+            },
+            {
               name: "configure-gemini",
               description: TOOL_DESCRIPTIONS.configureGemini
+            },
+            {
+              name: "configure-claude",
+              description: TOOL_DESCRIPTIONS.configureClaude
             },
             {
               name: "manage-configuration",
               description: TOOL_DESCRIPTIONS.manageConfiguration,
               configResource: "config://gemini-claude"
+            },
+            {
+              name: "manage-context",
+              description: TOOL_DESCRIPTIONS.manageContext
             },
             {
               name: "health-check",
@@ -1151,12 +1379,20 @@ server.resource("schema", "schema://metadata", async () => {
               description: "Gemini model configuration"
             },
             {
+              name: "config://claude/models",
+              description: "Claude model configuration"
+            },
+            {
               name: "config://gemini-claude",
               description: "Full server configuration"
             },
             {
               name: "config://gemini-claude/profile/{profile}",
               description: "Configuration profiles"
+            },
+            {
+              name: "context://{contextId}",
+              description: "Shared context between Claude and Gemini"
             }
           ]
         })
@@ -1241,12 +1477,14 @@ async function runServer() {
     logger.info("Connecting to transport");
     await server.connect(transport);
     
-    logger.info("Enhanced Gemini Bridge MCP Server running on stdio");
+    logger.info("Enhanced Claude-Gemini Bridge MCP Server running on stdio");
     
     // Display all available options
-    logger.info(`Available tools: analyze-repository, analyze-github-repository, analyze-files, chat-with-gemini, configure-gemini, manage-configuration, health-check`);
+    logger.info(`Available tools: analyze-repository, analyze-github-repository, analyze-files, chat-with-gemini, chat-with-claude, evolve-code, configure-gemini, configure-claude, manage-configuration, manage-context, health-check`);
     logger.info(`Available Gemini models: ${getAvailableModels().map(m => m.id).join(', ')}`);
-    logger.info(`Default model: ${configManager.getDefaultModel()}`);
+    logger.info(`Default Gemini model: ${configManager.getDefaultModel()}`);
+    logger.info(`Available Claude models: claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307`);
+    logger.info(`Default Claude model: ${configManager.getClaudeModel()}`);
     logger.info(`Available configuration profiles: ${Object.keys(configManager.getProfiles()).join(', ')}`);
     logger.info(`Active profile: ${configManager.getActiveProfile()}`);
     logger.debug("Server initialization complete");

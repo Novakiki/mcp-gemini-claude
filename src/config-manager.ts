@@ -21,6 +21,12 @@ class ConfigManager implements ConfigManagerInterface {
   private configPath: string;
   private config: ServerConfig;
   private logger: Logger;
+  
+  // Default Claude settings
+  private defaultClaudeModel = 'claude-3-opus-20240229';
+  private defaultClaudeTemperature = 0.7;
+  private defaultClaudeMaxTokens = 4096;
+  private defaultClaudeSystemPrompt = '';
 
   constructor(logger?: Logger) {
     this.logger = logger || {
@@ -45,6 +51,12 @@ class ConfigManager implements ConfigManagerInterface {
         defaultModel: process.env.GEMINI_DEFAULT_MODEL || DEFAULT_MODEL,
         defaultTemperature: 0.7,
         defaultMaxTokens: 8192
+      },
+      claude: {
+        defaultModel: process.env.CLAUDE_DEFAULT_MODEL || 'claude-3-opus-20240229',
+        defaultTemperature: 0.7,
+        defaultMaxTokens: 4096,
+        defaultSystemPrompt: ''
       },
       repository: {
         maxSizeBytes: 150 * 1024 * 1024, // 150 MB
@@ -343,6 +355,38 @@ class ConfigManager implements ConfigManagerInterface {
   }
 
   /**
+   * Get default Claude model
+   */
+  getClaudeModel(): string {
+    const config = this.getEffectiveProfileConfig();
+    return config.claude?.defaultModel || this.defaultClaudeModel;
+  }
+
+  /**
+   * Get default Claude temperature
+   */
+  getClaudeTemperature(): number {
+    const config = this.getEffectiveProfileConfig();
+    return config.claude?.defaultTemperature || this.defaultClaudeTemperature;
+  }
+
+  /**
+   * Get default Claude maximum tokens
+   */
+  getClaudeMaxTokens(): number {
+    const config = this.getEffectiveProfileConfig();
+    return config.claude?.defaultMaxTokens || this.defaultClaudeMaxTokens;
+  }
+
+  /**
+   * Get default Claude system prompt
+   */
+  getClaudeSystemPrompt(): string {
+    const config = this.getEffectiveProfileConfig();
+    return config.claude?.defaultSystemPrompt || this.defaultClaudeSystemPrompt;
+  }
+
+  /**
    * Get repository configuration
    */
   getRepositoryConfig(): RepositoryConfig {
@@ -412,6 +456,91 @@ class ConfigManager implements ConfigManagerInterface {
     }
     this.config.gemini.defaultMaxTokens = maxTokens;
     await this.saveConfig();
+  }
+
+  /**
+   * Set default Claude model
+   */
+  async setClaudeModel(model: string): Promise<void> {
+    // Add validation if needed
+    if (!this.config.claude) {
+      this.config.claude = {
+        defaultModel: this.defaultClaudeModel,
+        defaultTemperature: this.defaultClaudeTemperature,
+        defaultMaxTokens: this.defaultClaudeMaxTokens,
+        defaultSystemPrompt: this.defaultClaudeSystemPrompt
+      };
+    }
+    
+    this.config.claude.defaultModel = model;
+    await this.saveConfig();
+    
+    this.logger.info(`Set default Claude model to: ${model}`);
+  }
+
+  /**
+   * Set default Claude temperature
+   */
+  async setClaudeTemperature(temperature: number): Promise<void> {
+    if (temperature < 0 || temperature > 1) {
+      throw new Error(`Invalid temperature: ${temperature}. Must be between 0 and 1.`);
+    }
+    
+    if (!this.config.claude) {
+      this.config.claude = {
+        defaultModel: this.defaultClaudeModel,
+        defaultTemperature: this.defaultClaudeTemperature,
+        defaultMaxTokens: this.defaultClaudeMaxTokens,
+        defaultSystemPrompt: this.defaultClaudeSystemPrompt
+      };
+    }
+    
+    this.config.claude.defaultTemperature = temperature;
+    await this.saveConfig();
+    
+    this.logger.info(`Set default Claude temperature to: ${temperature}`);
+  }
+
+  /**
+   * Set default Claude maximum tokens
+   */
+  async setClaudeMaxTokens(maxTokens: number): Promise<void> {
+    if (maxTokens < 1) {
+      throw new Error(`Invalid max tokens: ${maxTokens}. Must be at least 1.`);
+    }
+    
+    if (!this.config.claude) {
+      this.config.claude = {
+        defaultModel: this.defaultClaudeModel,
+        defaultTemperature: this.defaultClaudeTemperature,
+        defaultMaxTokens: this.defaultClaudeMaxTokens,
+        defaultSystemPrompt: this.defaultClaudeSystemPrompt
+      };
+    }
+    
+    this.config.claude.defaultMaxTokens = maxTokens;
+    await this.saveConfig();
+    
+    this.logger.info(`Set default Claude max tokens to: ${maxTokens}`);
+  }
+
+  /**
+   * Set default Claude system prompt
+   */
+  async setClaudeSystemPrompt(systemPrompt: string): Promise<void> {
+    if (!this.config.claude) {
+      this.config.claude = {
+        defaultModel: this.defaultClaudeModel,
+        defaultTemperature: this.defaultClaudeTemperature,
+        defaultMaxTokens: this.defaultClaudeMaxTokens,
+        defaultSystemPrompt: this.defaultClaudeSystemPrompt
+      };
+    }
+    
+    this.config.claude.defaultSystemPrompt = systemPrompt;
+    await this.saveConfig();
+    
+    this.logger.info(`Updated default Claude system prompt`);
   }
 
   /**

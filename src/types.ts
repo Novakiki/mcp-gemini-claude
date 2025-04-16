@@ -14,11 +14,25 @@ export interface ConfigManagerInterface {
   getProfiles(): Record<string, ProfileConfig>;
   getActiveProfile(): string;
   
+  // Claude-specific getters
+  getClaudeModel(): string;
+  getClaudeTemperature(): number;
+  getClaudeMaxTokens(): number;
+  getClaudeSystemPrompt(): string;
+  
   // Setter methods
   loadConfig(): Promise<void>;
   setDefaultModel(model: string): Promise<void>;
   setDefaultTemperature(temperature: number): Promise<void>;
   setDefaultMaxTokens(maxTokens: number): Promise<void>;
+  
+  // Claude-specific setters
+  setClaudeModel(model: string): Promise<void>;
+  setClaudeTemperature(temperature: number): Promise<void>;
+  setClaudeMaxTokens(maxTokens: number): Promise<void>;
+  setClaudeSystemPrompt(systemPrompt: string): Promise<void>;
+  
+  // Profile management
   switchProfile(profileName: string): Promise<void>;
   createProfile(profile: ProfileConfig): Promise<void>;
   updateProfile(profileName: string, updates: Partial<ProfileConfig>): Promise<void>;
@@ -113,6 +127,12 @@ export interface ServerConfig {
     defaultModel: string;
     defaultTemperature: number;
     defaultMaxTokens: number;
+  };
+  claude?: {
+    defaultModel: string;
+    defaultTemperature: number;
+    defaultMaxTokens: number;
+    defaultSystemPrompt: string;
   };
   repository: RepositoryConfig;
   github?: GitHubConfig;

@@ -85,6 +85,19 @@ export class FileError extends BaseError {
 }
 
 /**
+ * Error for file not found
+ */
+export class FileAccessError extends FileError {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause);
+  }
+  
+  formatUserMessage(): string {
+    return `File Access Error: ${this.message}\n\nPlease check that the file exists and is accessible.`;
+  }
+}
+
+/**
  * Error related to path access security
  */
 export class PathAccessError extends BaseError {
@@ -249,6 +262,76 @@ export class GitHubCloneError extends BaseError {
 }
 
 /**
+ * Error related to AST parsing failures
+ */
+export class AstParseError extends BaseError {
+  constructor(message: string, public readonly filePath?: string, cause?: unknown) {
+    super(message, cause);
+  }
+  
+  formatUserMessage(): string {
+    const fileInfo = this.filePath ? ` for file "${this.filePath}"` : '';
+    return `AST Parse Error: ${this.message}${fileInfo}\n\nThe parser was unable to process the code. Please check the syntax or try a different parser.`;
+  }
+}
+
+/**
+ * Error related to unsupported programming languages
+ */
+export class UnsupportedLanguageError extends BaseError {
+  constructor(message: string, public readonly language?: string, cause?: unknown) {
+    super(message, cause);
+  }
+  
+  formatUserMessage(): string {
+    const langInfo = this.language ? ` (${this.language})` : '';
+    return `Unsupported Language Error: ${this.message}${langInfo}\n\nThe specified programming language is not currently supported. Please use one of the supported languages.`;
+  }
+}
+
+/**
+ * Error related to AST analysis failures
+ */
+export class AstAnalysisError extends BaseError {
+  constructor(message: string, public readonly filePath?: string, cause?: unknown) {
+    super(message, cause);
+  }
+  
+  formatUserMessage(): string {
+    const fileInfo = this.filePath ? ` for file "${this.filePath}"` : '';
+    return `AST Analysis Error: ${this.message}${fileInfo}\n\nThere was a problem analyzing the code structure. Please check the code or try a different analysis approach.`;
+  }
+}
+
+/**
+ * Error for context management operations
+ */
+export class ContextError extends BaseError {
+  constructor(message: string, public readonly contextId?: string, cause?: unknown) {
+    super(message, cause);
+  }
+  
+  formatUserMessage(): string {
+    const contextInfo = this.contextId ? ` for context ID "${this.contextId}"` : '';
+    return `Context Error: ${this.message}${contextInfo}\n\nThere was a problem with the shared context between models. Please check the context ID or try a new operation.`;
+  }
+}
+
+/**
+ * Error for evolution operations
+ */
+export class EvolutionError extends BaseError {
+  constructor(message: string, public readonly evolutionType?: string, cause?: unknown) {
+    super(message, cause);
+  }
+  
+  formatUserMessage(): string {
+    const evolutionInfo = this.evolutionType ? ` for operation type "${this.evolutionType}"` : '';
+    return `Evolution Error: ${this.message}${evolutionInfo}\n\nThere was a problem during the code evolution process. Please try a different approach or refine your query.`;
+  }
+}
+
+/**
  * Create an appropriate error from any error type
  */
 export function createAppropriateError(error: any): BaseError {
@@ -294,6 +377,22 @@ export function createAppropriateError(error: any): BaseError {
     }
     return new GitHubApiError(message, undefined, error);
   }
+
+  if (message.includes('AST') || message.includes('parse')) {
+    if (message.includes('language') || message.includes('supported')) {
+      return new UnsupportedLanguageError(message, '', error);
+    }
+    return new AstParseError(message, '', error);
+  }
+
+  if (message.includes('context')) {
+    return new ContextError(message, '', error);
+  }
+
+  if (message.includes('evolution') || message.includes('refactor') || 
+      message.includes('transform') || message.includes('improve')) {
+    return new EvolutionError(message, '', error);
+  }
   
   // Default to base error
   return new BaseError(message, error);
@@ -317,7 +416,12 @@ export function logErrorDetails(
       stack: error.stack,
       ...(error instanceof ModelError ? { modelId: error.modelId } : {}),
       ...(error instanceof RateLimitError ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
-      ...(error instanceof ValidationError ? { fieldErrors: error.fieldErrors } : {})
+      ...(error instanceof ValidationError ? { fieldErrors: error.fieldErrors } : {}),
+      ...(error instanceof AstParseError ? { filePath: error.filePath } : {}),
+      ...(error instanceof UnsupportedLanguageError ? { language: error.language } : {}),
+      ...(error instanceof AstAnalysisError ? { filePath: error.filePath } : {}),
+      ...(error instanceof ContextError ? { contextId: error.contextId } : {}),
+      ...(error instanceof EvolutionError ? { evolutionType: error.evolutionType } : {})
     });
   } else if (error instanceof Error) {
     logger.error(`Error: ${error.message}`, {
