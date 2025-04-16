@@ -139,3 +139,10 @@ test-results/
 
 # Temporary readme files
 readme-test.md
+# Build outputs
+dist/
+build/
+coverage/
+
+# Logs
+*.log
